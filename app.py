@@ -36,7 +36,7 @@ def create_app():
     # Initialize extensions
     db.init_app(app)
     JWTManager(app)
-    CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
+    CORS(app, origins=["http://localhost:3000", "http://localhost:3001", "https://doctor-backend-mzvn.onrender.com"], supports_credentials=True)
 
     # Register blueprints
     from routes.auth import auth_bp

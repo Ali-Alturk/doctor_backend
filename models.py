@@ -287,7 +287,8 @@ class SpecialRequest(db.Model):
 def init_db(app):
     """Initialize database tables and create default admin if none exists."""
     with app.app_context():
-        db.create_all()
+        # Use checkfirst=True to safely skip tables that already exist
+        db.create_all(checkfirst=True)
 
         # Auto-migration: add is_primer column if missing
         try:
@@ -439,7 +440,7 @@ def init_db(app):
         except Exception as e:
             print(f"Migration check skipped: {e}")
 
-        existing_user = User.query.first()
+        existing_user = User.query.filter_by(username="admin").first()
         if existing_user is None:
             admin = User(
                 username="admin",
