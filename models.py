@@ -287,8 +287,10 @@ class SpecialRequest(db.Model):
 def init_db(app):
     """Initialize database tables and create default admin if none exists."""
     with app.app_context():
-        # Use checkfirst=True to safely skip tables that already exist
-        db.create_all(checkfirst=True)
+        # Use SQLAlchemy directly with checkfirst=True so existing tables
+        # are safely skipped instead of raising OperationalError on restart
+        with db.engine.begin() as conn:
+            db.metadata.create_all(conn, checkfirst=True)
 
         # Auto-migration: add is_primer column if missing
         try:
