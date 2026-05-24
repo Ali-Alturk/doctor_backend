@@ -284,105 +284,82 @@ class SpecialRequest(db.Model):
 
 
 
+def _is_postgres(engine):
+    """Check if the database engine is PostgreSQL."""
+    return engine.dialect.name == "postgresql"
+
+
 def init_db(app):
     """Initialize database tables and create default admin if none exists."""
     with app.app_context():
         db.create_all()
 
-        # Auto-migration: add is_primer column if missing
-        try:
-            from sqlalchemy import text, inspect
-            inspector = inspect(db.engine)
+        is_pg = _is_postgres(db.engine)
 
-            # Track completed migrations
-            db.session.execute(text(
-                "CREATE TABLE IF NOT EXISTS _migrations "
-                "(name VARCHAR(100) PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-            ))
-            db.session.commit()
+        # Auto-migration: only needed for SQLite upgrades from older schemas.
+        # PostgreSQL gets the correct schema from db.create_all() above.
+        if not is_pg:
+            try:
+                from sqlalchemy import text, inspect
+                inspector = inspect(db.engine)
 
-            applied = set(
-                row[0] for row in
-                db.session.execute(text("SELECT name FROM _migrations")).fetchall()
-            )
+                # Track completed migrations
+                db.session.execute(text(
+                    "CREATE TABLE IF NOT EXISTS _migrations "
+                    "(name VARCHAR(100) PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                ))
+                db.session.commit()
 
-            if "add_is_primer" not in applied:
-                columns = [c["name"] for c in inspector.get_columns("shift_assignments")]
-                if "is_primer" not in columns:
+                applied = set(
+                    row[0] for row in
+                    db.session.execute(text("SELECT name FROM _migrations")).fetchall()
+                )
+
+                if "add_is_primer" not in applied:
+                    columns = [c["name"] for c in inspector.get_columns("shift_assignments")]
+                    if "is_primer" not in columns:
+                        db.session.execute(
+                            text("ALTER TABLE shift_assignments ADD COLUMN is_primer BOOLEAN DEFAULT 0")
+                        )
+                        print("Migration: added is_primer column to shift_assignments.")
                     db.session.execute(
-                        text("ALTER TABLE shift_assignments ADD COLUMN is_primer BOOLEAN DEFAULT 0")
+                        text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_is_primer')")
                     )
-                    print("Migration: added is_primer column to shift_assignments.")
-                db.session.execute(
-                    text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_is_primer')")
-                )
-                db.session.commit()
+                    db.session.commit()
 
-            if "remove_capacity_constraint" not in applied:
-                # Remove capacity check constraint by recreating shifts table (once only)
-                try:
-                    db.session.execute(text("""
-                        CREATE TABLE IF NOT EXISTS shifts_new (
-                            id INTEGER PRIMARY KEY,
-                            schedule_id INTEGER NOT NULL REFERENCES monthly_schedules(id),
-                            date DATE NOT NULL,
-                            day_type VARCHAR(20) NOT NULL CHECK(day_type IN ('workday', 'weekend', 'holiday')),
-                            attending_name VARCHAR(200),
-                            attending_degree VARCHAR(20) CHECK(attending_degree IS NULL OR attending_degree IN ('Professor', 'Specialist')),
-                            capacity INTEGER NOT NULL DEFAULT 3,
-                            UNIQUE(schedule_id, date)
-                        )
-                    """))
-                    db.session.execute(text("""
-                        INSERT OR IGNORE INTO shifts_new
-                        SELECT id, schedule_id, date, day_type, attending_name, attending_degree, capacity
-                        FROM shifts
-                    """))
-                    db.session.execute(text("DROP TABLE shifts"))
-                    db.session.execute(text("ALTER TABLE shifts_new RENAME TO shifts"))
-                    print("Migration: rebuilt shifts table (removed capacity constraint).")
-                except Exception as me:
-                    db.session.rollback()
-                    print(f"Shifts table migration note: {me}")
-                db.session.execute(
-                    text("INSERT OR IGNORE INTO _migrations (name) VALUES ('remove_capacity_constraint')")
-                )
-                db.session.commit()
+                if "remove_capacity_constraint" not in applied:
+                    try:
+                        db.session.execute(text("""
+                            CREATE TABLE IF NOT EXISTS shifts_new (
+                                id INTEGER PRIMARY KEY,
+                                schedule_id INTEGER NOT NULL REFERENCES monthly_schedules(id),
+                                date DATE NOT NULL,
+                                day_type VARCHAR(20) NOT NULL CHECK(day_type IN ('workday', 'weekend', 'holiday')),
+                                attending_name VARCHAR(200),
+                                attending_degree VARCHAR(20) CHECK(attending_degree IS NULL OR attending_degree IN ('Professor', 'Specialist')),
+                                capacity INTEGER NOT NULL DEFAULT 3,
+                                UNIQUE(schedule_id, date)
+                            )
+                        """))
+                        db.session.execute(text("""
+                            INSERT OR IGNORE INTO shifts_new
+                            SELECT id, schedule_id, date, day_type, attending_name, attending_degree, capacity
+                            FROM shifts
+                        """))
+                        db.session.execute(text("DROP TABLE shifts"))
+                        db.session.execute(text("ALTER TABLE shifts_new RENAME TO shifts"))
+                        print("Migration: rebuilt shifts table (removed capacity constraint).")
+                    except Exception as me:
+                        db.session.rollback()
+                        print(f"Shifts table migration note: {me}")
+                    db.session.execute(
+                        text("INSERT OR IGNORE INTO _migrations (name) VALUES ('remove_capacity_constraint')")
+                    )
+                    db.session.commit()
 
-            if "add_special_requests" not in applied:
-                existing_tables = inspector.get_table_names()
-                if "special_requests" not in existing_tables:
-                    db.session.execute(text("""
-                        CREATE TABLE special_requests (
-                            id INTEGER PRIMARY KEY,
-                            admin_id INTEGER NOT NULL REFERENCES users(id),
-                            year INTEGER NOT NULL,
-                            month INTEGER NOT NULL,
-                            request_type VARCHAR(30) NOT NULL CHECK(request_type IN ('must_work', 'must_not_work', 'must_work_with', 'weekend_off_after_duty')),
-                            doctor_id INTEGER NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
-                            date DATE,
-                            required_people TEXT,
-                            only_when_not_primer BOOLEAN DEFAULT 1,
-                            note VARCHAR(500),
-                            is_active BOOLEAN DEFAULT 1,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """))
-                    print("Migration: created special_requests table.")
-                db.session.execute(
-                    text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_special_requests')")
-                )
-                db.session.commit()
-
-            # Rebuild special_requests table if schema is outdated (v2)
-            if "rebuild_special_requests_v2" not in applied:
-                existing_tables = inspector.get_table_names()
-                if "special_requests" in existing_tables:
-                    # Check if old schema (has 'co_doctor_ids' column = old)
-                    cols = [c["name"] for c in inspector.get_columns("special_requests")]
-                    if "required_people" not in cols:
-                        db.session.execute(text("DROP TABLE special_requests"))
+                if "add_special_requests" not in applied:
+                    existing_tables = inspector.get_table_names()
+                    if "special_requests" not in existing_tables:
                         db.session.execute(text("""
                             CREATE TABLE special_requests (
                                 id INTEGER PRIMARY KEY,
@@ -400,46 +377,73 @@ def init_db(app):
                                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                             )
                         """))
-                        print("Migration: rebuilt special_requests table with new schema.")
-                db.session.execute(
-                    text("INSERT OR IGNORE INTO _migrations (name) VALUES ('rebuild_special_requests_v2')")
-                )
-                db.session.commit()
+                        print("Migration: created special_requests table.")
+                    db.session.execute(
+                        text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_special_requests')")
+                    )
+                    db.session.commit()
 
-            # Add only_when_primer column
-            if "add_only_when_primer" not in applied:
-                existing_tables = inspector.get_table_names()
-                if "special_requests" in existing_tables:
-                    cols = [c["name"] for c in inspector.get_columns("special_requests")]
-                    if "only_when_primer" not in cols:
-                        db.session.execute(
-                            text("ALTER TABLE special_requests ADD COLUMN only_when_primer BOOLEAN DEFAULT 0")
-                        )
-                        print("Migration: added only_when_primer to special_requests.")
-                db.session.execute(
-                    text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_only_when_primer')")
-                )
-                db.session.commit()
+                if "rebuild_special_requests_v2" not in applied:
+                    existing_tables = inspector.get_table_names()
+                    if "special_requests" in existing_tables:
+                        cols = [c["name"] for c in inspector.get_columns("special_requests")]
+                        if "required_people" not in cols:
+                            db.session.execute(text("DROP TABLE special_requests"))
+                            db.session.execute(text("""
+                                CREATE TABLE special_requests (
+                                    id INTEGER PRIMARY KEY,
+                                    admin_id INTEGER NOT NULL REFERENCES users(id),
+                                    year INTEGER NOT NULL,
+                                    month INTEGER NOT NULL,
+                                    request_type VARCHAR(30) NOT NULL CHECK(request_type IN ('must_work', 'must_not_work', 'must_work_with', 'weekend_off_after_duty')),
+                                    doctor_id INTEGER NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
+                                    date DATE,
+                                    required_people TEXT,
+                                    only_when_not_primer BOOLEAN DEFAULT 1,
+                                    note VARCHAR(500),
+                                    is_active BOOLEAN DEFAULT 1,
+                                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                                )
+                            """))
+                            print("Migration: rebuilt special_requests table with new schema.")
+                    db.session.execute(
+                        text("INSERT OR IGNORE INTO _migrations (name) VALUES ('rebuild_special_requests_v2')")
+                    )
+                    db.session.commit()
 
-            # Add attending_name column
-            if "add_attending_name" not in applied:
-                existing_tables = inspector.get_table_names()
-                if "special_requests" in existing_tables:
-                    cols = [c["name"] for c in inspector.get_columns("special_requests")]
-                    if "attending_name" not in cols:
-                        db.session.execute(
-                            text("ALTER TABLE special_requests ADD COLUMN attending_name VARCHAR(100)")
-                        )
-                        print("Migration: added attending_name to special_requests.")
-                db.session.execute(
-                    text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_attending_name')")
-                )
-                db.session.commit()
+                if "add_only_when_primer" not in applied:
+                    existing_tables = inspector.get_table_names()
+                    if "special_requests" in existing_tables:
+                        cols = [c["name"] for c in inspector.get_columns("special_requests")]
+                        if "only_when_primer" not in cols:
+                            db.session.execute(
+                                text("ALTER TABLE special_requests ADD COLUMN only_when_primer BOOLEAN DEFAULT 0")
+                            )
+                            print("Migration: added only_when_primer to special_requests.")
+                    db.session.execute(
+                        text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_only_when_primer')")
+                    )
+                    db.session.commit()
 
-        except Exception as e:
-            print(f"Migration check skipped: {e}")
+                if "add_attending_name" not in applied:
+                    existing_tables = inspector.get_table_names()
+                    if "special_requests" in existing_tables:
+                        cols = [c["name"] for c in inspector.get_columns("special_requests")]
+                        if "attending_name" not in cols:
+                            db.session.execute(
+                                text("ALTER TABLE special_requests ADD COLUMN attending_name VARCHAR(100)")
+                            )
+                            print("Migration: added attending_name to special_requests.")
+                    db.session.execute(
+                        text("INSERT OR IGNORE INTO _migrations (name) VALUES ('add_attending_name')")
+                    )
+                    db.session.commit()
 
-        # Seed admin user (wrapped in try/except for safety)
+            except Exception as e:
+                print(f"Migration check skipped: {e}")
+
+        # Seed admin user (works on both SQLite and PostgreSQL)
         try:
             existing_user = User.query.filter_by(username="admin").first()
             if existing_user is None:
@@ -467,3 +471,4 @@ def init_db(app):
         except Exception as e:
             db.session.rollback()
             print(f"Admin seed skipped (already exists or error): {e}")
+
