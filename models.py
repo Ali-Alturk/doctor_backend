@@ -287,10 +287,7 @@ class SpecialRequest(db.Model):
 def init_db(app):
     """Initialize database tables and create default admin if none exists."""
     with app.app_context():
-        # Use SQLAlchemy directly with checkfirst=True so existing tables
-        # are safely skipped instead of raising OperationalError on restart
-        with db.engine.begin() as conn:
-            db.metadata.create_all(conn, checkfirst=True)
+        db.create_all()
 
         # Auto-migration: add is_primer column if missing
         try:
@@ -442,26 +439,31 @@ def init_db(app):
         except Exception as e:
             print(f"Migration check skipped: {e}")
 
-        existing_user = User.query.filter_by(username="admin").first()
-        if existing_user is None:
-            admin = User(
-                username="admin",
-                role="admin",
-                hospital_name="City Hospital",
-                department_name="Pediatric Surgery",
-            )
-            
-            default_password = os.environ.get("DEFAULT_ADMIN_PASSWORD")
-            if not default_password:
-                alphabet = string.ascii_letters + string.digits
-                default_password = ''.join(secrets.choice(alphabet) for i in range(12))
-                print(f"WARNING: No DEFAULT_ADMIN_PASSWORD provided. Generated random password: {default_password}")
-            else:
-                print("Admin user created using DEFAULT_ADMIN_PASSWORD from environment.")
+        # Seed admin user (wrapped in try/except for safety)
+        try:
+            existing_user = User.query.filter_by(username="admin").first()
+            if existing_user is None:
+                admin = User(
+                    username="admin",
+                    role="admin",
+                    hospital_name="City Hospital",
+                    department_name="Pediatric Surgery",
+                )
                 
-            admin.set_password(default_password)
-            db.session.add(admin)
-            db.session.commit()
-            
-            if not os.environ.get("DEFAULT_ADMIN_PASSWORD"):
-                print("IMPORTANT: Please save this password or change it immediately.")
+                default_password = os.environ.get("DEFAULT_ADMIN_PASSWORD")
+                if not default_password:
+                    alphabet = string.ascii_letters + string.digits
+                    default_password = ''.join(secrets.choice(alphabet) for i in range(12))
+                    print(f"WARNING: No DEFAULT_ADMIN_PASSWORD provided. Generated random password: {default_password}")
+                else:
+                    print("Admin user created using DEFAULT_ADMIN_PASSWORD from environment.")
+                    
+                admin.set_password(default_password)
+                db.session.add(admin)
+                db.session.commit()
+                
+                if not os.environ.get("DEFAULT_ADMIN_PASSWORD"):
+                    print("IMPORTANT: Please save this password or change it immediately.")
+        except Exception as e:
+            db.session.rollback()
+            print(f"Admin seed skipped (already exists or error): {e}")
