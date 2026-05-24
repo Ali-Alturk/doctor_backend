@@ -1,0 +1,23 @@
+services:
+  backend:
+    build: ./backend
+    container_name: shift-scheduler-backend
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/data:/app/data
+    env_file:
+      - .env
+    environment:
+      - FLASK_ENV=development
+      - DATABASE_URL=sqlite:////app/data/scheduler.db
+
+  frontend:
+    build: ./frontend
+    container_name: shift-scheduler-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+    depends_on:
+      - backend

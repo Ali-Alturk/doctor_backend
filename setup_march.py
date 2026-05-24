@@ -1,0 +1,114 @@
+"""
+March 2026 Setup Script - Updates doctor targets for March scheduling.
+Run from backend directory: python setup_march.py
+"""
+import sys, os
+sys.stdout.reconfigure(encoding='utf-8')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from datetime import date
+from app import create_app
+from models import db, Doctor, User, LeaveRequest
+
+YEAR = 2026
+MONTH = 3  # March
+
+def setup_march():
+    app = create_app()
+    with app.app_context():
+        admin = User.query.filter_by(username="admin").first()
+        if not admin:
+            print("[ERROR] Admin user not found!")
+            return
+
+        doctors = {d.full_name: d for d in Doctor.query.filter_by(admin_id=admin.id).all()}
+        print(f"[INFO] Found {len(doctors)} doctors")
+
+        # ============================================================
+        # 1. UPDATE TARGET SHIFTS PER MONTH FOR MARCH
+        # ============================================================
+        shift_targets = {
+            "EKG": 6,   # Senior, rank 1 — full primer
+            "İBB": 7,   # Senior, rank 2 — full primer
+            "BBÖ": 7,   # Senior, rank 3 — full primer
+            "BSK": 7,   # Senior, rank 4 — full primer
+            "ÖŞ": 0,    # Mid — not available (yok)
+            "EZ": 7,    # Mid — 3 primer
+            "ABR": 7,   # Mid — 3 primer
+            "ZÖ": 8,    # Mid
+            "AK": 8,    # Mid
+            "ÇB": 8,    # Junior
+            "EBT": 8,   # Junior
+            "SYİ": 8,   # Junior
+            "BN": 8,    # Junior
+            "AH": 8,    # Junior
+            "CA": 8,    # Junior
+            "AKB": 8,   # Junior
+            "AP": 8,    # Junior
+            "AMH": 8,   # Junior
+        }
+
+        total = 0
+        for name, target in shift_targets.items():
+            if name in doctors:
+                doctors[name].target_shifts_per_month = target
+                total += target
+                print(f"  [OK] {name}: target = {target}")
+            else:
+                print(f"  [WARN] {name} not found in database!")
+        db.session.commit()
+
+        print(f"\n[INFO] Total target shifts: {total}")
+        print(f"[INFO] March has 31 days")
+        print(f"[INFO] Base capacity: {total // 31} per day + {total % 31} extra days")
+        print()
+
+        # ============================================================
+        # 2. SET UP LEAVES FOR OS (entire march)
+        # ============================================================
+        print("[INFO] Setting up leaves...")
+
+        doc_os = doctors.get("ÖŞ")
+        if doc_os:
+            created = 0
+            for day_num in range(1, 32):
+                d = date(YEAR, MONTH, day_num)
+                existing = LeaveRequest.query.filter_by(doctor_id=doc_os.id, date=d).first()
+                if existing:
+                    if existing.status != "Approved":
+                        existing.status = "Approved"
+                        created += 1
+                else:
+                    leave = LeaveRequest(
+                        doctor_id=doc_os.id,
+                        date=d,
+                        reason="Not available this month",
+                        status="Approved",
+                        submitted_by_admin=True,
+                    )
+                    db.session.add(leave)
+                    created += 1
+            db.session.commit()
+            print(f"  [OK] OS: {created} leave days created/updated (31 total)")
+        print()
+
+        # ============================================================
+        # 3. SUMMARY
+        # ============================================================
+        print("=" * 50)
+        print(f"  March {YEAR} setup complete!")
+        print(f"  Total target shifts: {total}")
+        print(f"  Capacity: {total // 31}/day + {total % 31} days with {total // 31 + 1}")
+        print()
+        print("  Next steps:")
+        print("  1. Restart backend server")
+        print("  2. Go to Monthly Setup (March 2026)")
+        print("  3. Set attending names/degrees (Professor/Specialist)")
+        print("  4. Save Setup")
+        print("  5. Set Primer: EZ=3, ABR=3")
+        print("  6. Generate Schedule")
+        print("=" * 50)
+
+
+if __name__ == "__main__":
+    setup_march()
